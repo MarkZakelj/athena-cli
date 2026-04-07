@@ -1,0 +1,23 @@
+[project]
+name = "athena-cli"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "MarkZakelj", email = "markzakelj@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "typer>=0.15",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "boto3>=1.35",
+    "rich>=13.0",
+]
+
+[project.scripts]
+athena-cli = "athena_cli.cli:app_entry"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

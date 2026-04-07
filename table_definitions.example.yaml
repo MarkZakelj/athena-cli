@@ -1,0 +1,16 @@
+# Table definitions for Athena tables used 
+# This file defines the schema
+
+sample_table_a:
+  columns:
+    column_name_one: float
+    column_name_two: bigint
+    column_name_three: double
+    column_name_four: int
+  partitions:
+    column_for_partition: date                   # Partition key in yyyy-mm-dd format
+
+sample_table_b:
+  columns:
+    first_col: float
+    second_col: double
