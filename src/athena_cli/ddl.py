@@ -71,6 +71,13 @@ def generate_alter_add_columns(
     )
 
 
+def generate_alter_change_column(
+    table_name: str, database: str, column_name: str, new_type: str
+) -> str:
+    """Generate ALTER TABLE CHANGE COLUMN DDL for type widening."""
+    return f"ALTER TABLE `{database}`.`{table_name}` CHANGE COLUMN `{column_name}` `{column_name}` {new_type};"
+
+
 def generate_drop_table(table_name: str, database: str) -> str:
     """Generate DROP TABLE DDL."""
     return f"DROP TABLE IF EXISTS `{database}`.`{table_name}`;"

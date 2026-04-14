@@ -15,6 +15,9 @@ dependencies = [
     "rich>=13.0",
 ]
 
+[project.optional-dependencies]
+infer = ["pyarrow>=14.0"]
+
 [project.scripts]
 athena-cli = "athena_cli.cli:app_entry"
 

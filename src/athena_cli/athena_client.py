@@ -9,13 +9,27 @@ import boto3
 from athena_cli.schema import SchemaConfig
 from athena_cli.types import SERDE_TO_FORMAT, normalize_type
 
+_session: boto3.Session | None = None
 
-def _glue_client(catalog: str = "AwsDataCatalog"):
-    return boto3.client("glue")
+
+def init_session(profile: str | None = None) -> None:
+    """Initialize the boto3 session with an optional AWS profile."""
+    global _session
+    _session = boto3.Session(profile_name=profile) if profile else boto3.Session()
+
+
+def _get_session() -> boto3.Session:
+    if _session is None:
+        init_session()
+    return _session
+
+
+def _glue_client():
+    return _get_session().client("glue")
 
 
 def _athena_client():
-    return boto3.client("athena")
+    return _get_session().client("athena")
 
 
 def get_glue_table(database: str, table_name: str, catalog: str = "AwsDataCatalog") -> dict:
@@ -23,7 +37,7 @@ def get_glue_table(database: str, table_name: str, catalog: str = "AwsDataCatalo
 
     Returns a dict with keys: columns, partitions, location, format, description, properties.
     """
-    client = _glue_client(catalog)
+    client = _glue_client()
     response = client.get_table(DatabaseName=database, Name=table_name)
     table = response["Table"]
     sd = table.get("StorageDescriptor", {})
@@ -66,13 +80,27 @@ def get_glue_table(database: str, table_name: str, catalog: str = "AwsDataCatalo
 
 def list_glue_tables(database: str, catalog: str = "AwsDataCatalog") -> list[str]:
     """List all table names in a Glue database."""
-    client = _glue_client(catalog)
+    client = _glue_client()
     paginator = client.get_paginator("get_tables")
     tables = []
     for page in paginator.paginate(DatabaseName=database):
         for table in page["TableList"]:
             tables.append(table["Name"])
     return sorted(tables)
+
+
+def list_partitions(database: str, table_name: str, config: SchemaConfig) -> list[str]:
+    """List all partitions of a table via Athena SHOW PARTITIONS."""
+    query_id = execute_ddl(f"SHOW PARTITIONS `{database}`.`{table_name}`", config)
+    client = _athena_client()
+    partitions: list[str] = []
+    paginator = client.get_paginator("get_query_results")
+    for page in paginator.paginate(QueryExecutionId=query_id):
+        for row in page["ResultSet"]["Rows"]:
+            val = row["Data"][0].get("VarCharValue", "")
+            if val:
+                partitions.append(val)
+    return sorted(partitions)
 
 
 def execute_ddl(ddl: str, config: SchemaConfig) -> str:

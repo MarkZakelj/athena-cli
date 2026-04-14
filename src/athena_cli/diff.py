@@ -7,14 +7,14 @@ from dataclasses import dataclass
 from rich import print as rprint
 
 from athena_cli.schema import TableDefinition
-from athena_cli.types import normalize_type
+from athena_cli.types import is_safe_widening, normalize_type
 
 
 @dataclass
 class TableDiff:
     """A single difference between local and remote table state."""
 
-    kind: str  # column_added, column_removed, column_type_changed, partition_changed, location_changed, format_changed
+    kind: str  # column_added, column_removed, column_type_changed, column_type_widened, partition_changed, location_changed, format_changed
     column: str | None  # column name, if applicable
     local_type: str | None  # local type, if applicable
     remote_type: str | None  # remote type, if applicable
@@ -28,8 +28,8 @@ def diff_table(local: TableDefinition, remote: dict) -> list[TableDiff]:
     """
     diffs: list[TableDiff] = []
 
-    local_cols = {k: normalize_type(v) for k, v in local.columns.items()}
-    remote_cols = remote.get("columns", {})
+    local_cols = {k.lower(): normalize_type(v) for k, v in local.columns.items()}
+    remote_cols = {k.lower(): v for k, v in remote.get("columns", {}).items()}
 
     # Columns added locally (not in remote)
     for col in local_cols:
@@ -59,17 +59,38 @@ def diff_table(local: TableDefinition, remote: dict) -> list[TableDiff]:
             lt = local_cols[col]
             rt = remote_cols[col]
             if lt != rt:
-                diffs.append(TableDiff(
-                    kind="column_type_changed",
-                    column=col,
-                    local_type=lt,
-                    remote_type=rt,
-                    description=f"Column '{col}' type: local={lt}, remote={rt}",
-                ))
+                if is_safe_widening(rt, lt):
+                    diffs.append(TableDiff(
+                        kind="column_type_widened",
+                        column=col,
+                        local_type=lt,
+                        remote_type=rt,
+                        description=f"Column '{col}' safe widening: {rt} -> {lt}",
+                    ))
+                else:
+                    diffs.append(TableDiff(
+                        kind="column_type_changed",
+                        column=col,
+                        local_type=lt,
+                        remote_type=rt,
+                        description=f"Column '{col}' type: local={lt}, remote={rt}",
+                    ))
+
+    # Column order change (only matters for position-based formats)
+    common_cols = [c for c in local_cols if c in remote_cols]
+    remote_order = [c for c in remote_cols if c in local_cols]
+    if common_cols != remote_order and local.format.lower() in ("csv", "json"):
+        diffs.append(TableDiff(
+            kind="column_order_changed",
+            column=None,
+            local_type=None,
+            remote_type=None,
+            description=f"Column order changed — {local.format.upper()} uses positional mapping, this may cause data mismatch",
+        ))
 
     # Partition changes
-    local_parts = {k: normalize_type(v) for k, v in (local.partitions or {}).items()}
-    remote_parts = remote.get("partitions", {})
+    local_parts = {k.lower(): normalize_type(v) for k, v in (local.partitions or {}).items()}
+    remote_parts = {k.lower(): v for k, v in remote.get("partitions", {}).items()}
     if local_parts != remote_parts:
         diffs.append(TableDiff(
             kind="partition_changed",
@@ -113,11 +134,15 @@ def print_diff(diffs: list[TableDiff]) -> None:
             rprint(f"  [green]+ {d.column}[/green] ({d.local_type})")
         elif d.kind == "column_removed":
             rprint(f"  [red]- {d.column}[/red] ({d.remote_type})")
+        elif d.kind == "column_type_widened":
+            rprint(f"  [cyan]~ {d.column}[/cyan]: {d.remote_type} -> {d.local_type} [dim](safe widening)[/dim]")
         elif d.kind == "column_type_changed":
-            rprint(f"  [yellow]~ {d.column}[/yellow]: {d.remote_type} -> {d.local_type}")
+            rprint(f"  [yellow]~ {d.column}[/yellow]: {d.remote_type} -> {d.local_type} [red](destructive)[/red]")
         elif d.kind == "partition_changed":
             rprint(f"  [red]⚠ Partitions changed:[/red] {d.description}")
         elif d.kind == "location_changed":
             rprint(f"  [yellow]⚠ Location changed:[/yellow] {d.remote_type} -> {d.local_type}")
         elif d.kind == "format_changed":
             rprint(f"  [yellow]⚠ Format changed:[/yellow] {d.remote_type} -> {d.local_type}")
+        elif d.kind == "column_order_changed":
+            rprint(f"  [red]⚠ {d.description}[/red]")

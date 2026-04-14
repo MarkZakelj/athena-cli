@@ -99,6 +99,45 @@ def _split_top_level(s: str, delimiter: str) -> list[str]:
     return parts
 
 
+# Safe type widenings — these can be done via ALTER TABLE CHANGE COLUMN
+_INT_HIERARCHY = ["tinyint", "smallint", "int", "bigint"]
+_FLOAT_HIERARCHY = ["float", "double"]
+
+_WIDENING_RULES: dict[str, set[str]] = {}
+for _hierarchy in [_INT_HIERARCHY, _FLOAT_HIERARCHY]:
+    for i, _from in enumerate(_hierarchy):
+        for _to in _hierarchy[i + 1 :]:
+            _WIDENING_RULES.setdefault(_from, set()).add(_to)
+
+# varchar(n) -> varchar(m) where m > n, varchar(n) -> string, char(n) -> string
+_PARAM_VARCHAR_RE = re.compile(r"^varchar\((\d+)\)$")
+
+
+def is_safe_widening(from_type: str, to_type: str) -> bool:
+    """Check if changing from_type to to_type is a safe widening operation."""
+    f = from_type.strip().lower()
+    t = to_type.strip().lower()
+
+    if f == t:
+        return True
+
+    # Primitive widenings (int hierarchy, float hierarchy)
+    if f in _WIDENING_RULES and t in _WIDENING_RULES[f]:
+        return True
+
+    # varchar(n) -> varchar(m) where m > n
+    f_match = _PARAM_VARCHAR_RE.match(f)
+    t_match = _PARAM_VARCHAR_RE.match(t)
+    if f_match and t_match:
+        return int(t_match.group(1)) > int(f_match.group(1))
+
+    # varchar(n) -> string, char(n) -> string
+    if t == "string" and (_PARAM_VARCHAR_RE.match(f) or _CHAR_RE.match(f)):
+        return True
+
+    return False
+
+
 # Mapping from Glue/catalog type strings to canonical Athena types
 GLUE_TYPE_MAP = {
     "int": "int",

@@ -1,16 +1,28 @@
-# Table definitions for Athena tables used 
+# Table definitions for Athena tables used
 # This file defines the schema
 
+_config:
+  database: my_database           # Default database for all tables
+  catalog: AwsDataCatalog         # Default: AwsDataCatalog
+  workgroup: primary              # Default: primary
+  output_location: s3://my-bucket/query-results/
+
 sample_table_a:
+  database: other_database          # Overrides _config.database for this table only
+  location: s3://my-bucket/sample_table_a/
+  format: parquet                   # parquet | orc | csv | json | avro (default: parquet)
+  description: "Example table with all per-table fields set"
   columns:
     column_name_one: float
     column_name_two: bigint
     column_name_three: double
     column_name_four: int
   partitions:
-    column_for_partition: date                   # Partition key in yyyy-mm-dd format
+    column_for_partition: date      # Partition key in yyyy-mm-dd format
+  properties:
+    projection.enabled: "true"      # Arbitrary Athena table properties (TBLPROPERTIES)
 
 sample_table_b:
-  columns:
+  columns:                          # Minimal table — inherits database from _config
     first_col: float
     second_col: double

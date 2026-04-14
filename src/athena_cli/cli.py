@@ -12,6 +12,7 @@ from rich.table import Table
 
 from athena_cli.ddl import (
     generate_alter_add_columns,
+    generate_alter_change_column,
     generate_create_table,
     generate_drop_table,
     generate_msck_repair,
@@ -25,6 +26,19 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+@app.callback()
+def main(
+    profile: Annotated[
+        Optional[str],
+        typer.Option("--profile", "-p", help="AWS profile to use"),
+    ] = None,
+) -> None:
+    if profile:
+        from athena_cli.athena_client import init_session
+
+        init_session(profile)
 
 # ---------------------------------------------------------------------------
 # Completion helpers
@@ -136,7 +150,7 @@ def validate(
     table.add_column("Database", style="green")
     table.add_column("Format", style="yellow")
     table.add_column("Columns", justify="right")
-    table.add_column("Partitions", justify="right")
+    table.add_column("Partition Cols", justify="right")
     table.add_column("Location")
 
     for name, tbl in schema.tables.items():
@@ -236,6 +250,7 @@ def push(
 
             # Categorize changes
             new_columns = {d.column: d.local_type for d in diffs if d.kind == "column_added"}
+            widenings = {d.column: d.local_type for d in diffs if d.kind == "column_type_widened"}
             destructive = [d for d in diffs if d.kind in ("column_removed", "column_type_changed", "partition_changed")]
 
             if destructive:
@@ -256,14 +271,26 @@ def push(
                     execute_ddl(drop_ddl, schema.config)
                     execute_ddl(create_ddl, schema.config)
                     rprint("  [green]✓ Recreated[/green]")
-            elif new_columns:
-                ddl = generate_alter_add_columns(tbl.name, db, new_columns)
-                rprint(f"  [cyan]ALTER TABLE ADD COLUMNS[/cyan]: {', '.join(new_columns.keys())}")
-                if dry_run:
-                    rprint(f"\n[dim]{ddl}[/dim]\n")
-                else:
-                    execute_ddl(ddl, schema.config)
-                    rprint("  [green]✓ Columns added[/green]")
+            else:
+                if widenings:
+                    for col_name, new_type in widenings.items():
+                        ddl = generate_alter_change_column(tbl.name, db, col_name, new_type)
+                        rprint(f"  [cyan]ALTER CHANGE COLUMN[/cyan] {col_name} -> {new_type}")
+                        if dry_run:
+                            rprint(f"    [dim]{ddl}[/dim]")
+                        else:
+                            execute_ddl(ddl, schema.config)
+                    if not dry_run:
+                        rprint(f"  [green]✓ {len(widenings)} column(s) widened[/green]")
+
+                if new_columns:
+                    ddl = generate_alter_add_columns(tbl.name, db, new_columns)
+                    rprint(f"  [cyan]ALTER TABLE ADD COLUMNS[/cyan]: {', '.join(new_columns.keys())}")
+                    if dry_run:
+                        rprint(f"\n[dim]{ddl}[/dim]\n")
+                    else:
+                        execute_ddl(ddl, schema.config)
+                        rprint("  [green]✓ Columns added[/green]")
 
 
 @app.command()
@@ -280,8 +307,6 @@ def pull(
     merge: Annotated[bool, typer.Option("--merge", help="Add new tables without touching existing")] = False,
 ) -> None:
     """Pull table definitions from Athena into table_definitions.yaml."""
-    import yaml
-
     from athena_cli.athena_client import get_glue_table, list_glue_tables
 
     # Try to load existing schema, or start fresh
@@ -305,18 +330,6 @@ def pull(
         rprint(f"Found [cyan]{len(remote_names)}[/cyan] tables in {db}")
 
     pulled = 0
-    raw: dict = {}
-
-    # Preserve _config
-    raw["_config"] = schema.config.model_dump(exclude_defaults=True) or None
-    if raw["_config"] is None:
-        raw.pop("_config")
-
-    # Preserve existing tables if merge mode
-    if merge:
-        for name, tbl in schema.tables.items():
-            raw[name] = _table_to_dict(tbl)
-
     for rname in remote_names:
         if merge and rname in schema.tables:
             rprint(f"  [dim]Skipping {rname} (already in schema)[/dim]")
@@ -325,18 +338,23 @@ def pull(
         if not merge and rname in schema.tables:
             rprint(f"  [yellow]Warning:[/yellow] '{rname}' already exists in schema")
             if not typer.confirm(f"  Overwrite '{rname}'?", default=False):
-                raw[rname] = _table_to_dict(schema.tables[rname])
                 continue
+            # Overwriting an existing table requires rewriting that section —
+            # for now, warn that comments on that table block may be lost
+            rprint(f"  [dim]Note: comments on '{rname}' block may be lost[/dim]")
 
         try:
             remote = get_glue_table(db, rname, schema.config.catalog)
-            raw[rname] = _remote_to_dict(remote)
+            table_dict = _remote_to_dict(remote)
+            if rname in schema.tables:
+                _replace_table_in_yaml(path, rname, table_dict)
+            else:
+                _append_table_to_yaml(path, rname, table_dict)
             rprint(f"  [green]✓[/green] Pulled {rname}")
             pulled += 1
         except Exception as e:
             rprint(f"  [red]Error pulling {rname}:[/red] {e}")
 
-    path.write_text(yaml.dump(raw, default_flow_style=False, sort_keys=False))
     rprint(f"\n[green]Pulled {pulled} table(s)[/green] into {path}")
 
 
@@ -348,7 +366,7 @@ def repair(
     schema_path: SchemaPathOption = None,
 ) -> None:
     """Run MSCK REPAIR TABLE to discover partitions."""
-    from athena_cli.athena_client import execute_ddl
+    from athena_cli.athena_client import execute_ddl, list_partitions
 
     _, schema = _load_schema(schema_path)
     tbl = _get_table(schema, table_name)
@@ -358,10 +376,22 @@ def repair(
         rprint(f"[yellow]Warning:[/yellow] Table '{table_name}' has no partitions defined")
         raise typer.Exit(0)
 
+    rprint(f"Fetching current partitions for {db}.{tbl.name}...")
+    before = set(list_partitions(db, tbl.name, schema.config))
+
     ddl = generate_msck_repair(tbl.name, db)
     rprint(f"Running: [dim]{ddl}[/dim]")
     execute_ddl(ddl, schema.config)
-    rprint(f"[green]✓[/green] Repaired {db}.{tbl.name}")
+
+    after = set(list_partitions(db, tbl.name, schema.config))
+    new_partitions = sorted(after - before)
+
+    if new_partitions:
+        rprint(f"[green]✓[/green] Repaired {db}.{tbl.name} — discovered {len(new_partitions)} new partition(s) (was {len(before)}, now {len(after)})")
+        for p in new_partitions:
+            rprint(f"  [green]+ {p}[/green]")
+    else:
+        rprint(f"[green]✓[/green] Repaired {db}.{tbl.name} — no new partitions ({len(after)} total)")
 
 
 @app.command()
@@ -387,6 +417,78 @@ def drop(
     rprint(f"Running: [dim]{ddl}[/dim]")
     execute_ddl(ddl, schema.config)
     rprint(f"[green]✓[/green] Dropped {db}.{tbl.name}")
+
+
+@app.command()
+def infer(
+    table_name: Annotated[str, typer.Argument(help="Name for the new table")],
+    s3_url: Annotated[str, typer.Argument(help="S3 location (e.g. s3://bucket/path/)")],
+    schema_path: SchemaPathOption = None,
+) -> None:
+    """Infer a table definition from an S3 location and add it to the schema."""
+    from athena_cli.infer import read_orc_schema, read_parquet_schema, scan_s3_location
+
+    # Load or create schema file
+    try:
+        path = schema_path or find_schema_file()
+        schema = parse_schema_file(path)
+    except FileNotFoundError:
+        path = Path("table_definitions.yaml")
+        schema = SchemaFile(config=SchemaConfig(), tables={})
+
+    if table_name in schema.tables:
+        rprint(f"[yellow]Warning:[/yellow] '{table_name}' already exists in schema")
+        if not typer.confirm("Overwrite?", default=False):
+            raise typer.Exit(0)
+
+    rprint(f"Scanning [cyan]{s3_url}[/cyan]...")
+    scan = scan_s3_location(s3_url)
+
+    rprint(f"  Format: [green]{scan['format']}[/green] ({scan['file_count']} files)")
+
+    if scan["partitions"]:
+        parts_str = ", ".join(f"{k} ({v})" for k, v in scan["partitions"].items())
+        rprint(f"  Partitions: [green]{parts_str}[/green]")
+    else:
+        rprint("  Partitions: [dim]none[/dim]")
+
+    # Try to read column schema
+    columns: dict[str, str] = {}
+    if scan["sample_key"] and scan["format"] in ("parquet", "orc"):
+        try:
+            if scan["format"] == "parquet":
+                columns = read_parquet_schema(scan["sample_bucket"], scan["sample_key"])
+            else:
+                columns = read_orc_schema(scan["sample_bucket"], scan["sample_key"])
+
+            # Remove partition columns from regular columns
+            for p in scan["partitions"]:
+                columns.pop(p, None)
+
+            rprint(f"  Columns: [green]{len(columns)}[/green] (from sample file)")
+        except ImportError:
+            rprint(
+                "  [yellow]⚠ Install with infer support to auto-detect columns:[/yellow]\n"
+                '    uv tool install "athena-cli[infer]"'
+            )
+    elif scan["format"] not in ("parquet", "orc"):
+        rprint(f"  [dim]Column detection not supported for {scan['format']} — add columns manually[/dim]")
+
+    # Build table entry
+    table_dict: dict = {
+        "location": s3_url.rstrip("/") + "/",
+        "format": scan["format"],
+        "columns": columns if columns else {"TODO_column_name": "string"},
+    }
+    if scan["partitions"]:
+        table_dict["partitions"] = scan["partitions"]
+
+    _append_table_to_yaml(path, table_name, table_dict)
+
+    if columns:
+        rprint(f"\n[green]✓[/green] Added '{table_name}' to {path}")
+    else:
+        rprint(f"\n[green]✓[/green] Added '{table_name}' (skeleton) to {path} — edit columns manually")
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +526,64 @@ def _remote_to_dict(remote: dict) -> dict:
     if remote.get("partitions"):
         d["partitions"] = remote["partitions"]
     return d
+
+
+def _append_table_to_yaml(path: Path, table_name: str, table_dict: dict) -> None:
+    """Append a table definition to the YAML file without rewriting existing content."""
+    import yaml
+
+    block = yaml.dump(
+        {table_name: table_dict}, default_flow_style=False, sort_keys=False
+    )
+
+    if path.exists():
+        existing = path.read_text()
+        # Ensure there's an empty line separator
+        if existing and not existing.endswith("\n\n"):
+            existing = existing.rstrip("\n") + "\n\n"
+        path.write_text(existing + block)
+    else:
+        path.write_text(block)
+
+
+def _replace_table_in_yaml(path: Path, table_name: str, table_dict: dict) -> None:
+    """Replace a table definition in the YAML file, preserving surrounding content."""
+    import re
+
+    import yaml
+
+    content = path.read_text()
+    lines = content.split("\n")
+
+    # Find the table block: starts with "table_name:" at column 0,
+    # ends before the next top-level key or EOF
+    start_idx = None
+    end_idx = None
+    for i, line in enumerate(lines):
+        if line.rstrip() == f"{table_name}:" or line.startswith(f"{table_name}:"):
+            start_idx = i
+        elif start_idx is not None and line and not line[0].isspace() and line[0] != "#":
+            end_idx = i
+            break
+
+    if start_idx is None:
+        # Table not found — just append
+        _append_table_to_yaml(path, table_name, table_dict)
+        return
+
+    if end_idx is None:
+        end_idx = len(lines)
+
+    # Strip trailing blank lines from the block we're removing
+    while end_idx > start_idx and not lines[end_idx - 1].strip():
+        end_idx -= 1
+
+    new_block = yaml.dump(
+        {table_name: table_dict}, default_flow_style=False, sort_keys=False
+    ).rstrip("\n")
+
+    new_lines = lines[:start_idx] + [new_block] + lines[end_idx:]
+    path.write_text("\n".join(new_lines))
 
 
 # ---------------------------------------------------------------------------
