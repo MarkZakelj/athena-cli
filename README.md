@@ -5,13 +5,13 @@ Manage AWS Athena table schemas from a single YAML file. Define your tables loca
 ## Install
 
 ```bash
-uv tool install athena-cli
+uv tool install git+https://github.com/MarkZakelj/athena-cli
 ```
 
 To also infer schemas from Parquet/ORC files on S3:
 
 ```bash
-uv tool install "athena-cli[infer]"
+uv tool install "git+https://github.com/MarkZakelj/athena-cli[infer]"
 ```
 
 ## Quickstart
