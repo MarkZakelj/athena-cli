@@ -138,6 +138,81 @@ example_table:
     rprint(f"[green]Created[/green] {path}")
 
 
+EXAMPLE_YAML = """\
+# ===========================================================================
+# table_definitions.yaml — annotated example
+# Every table you want athena-cli to manage lives in this single file.
+# Docs: https://github.com/MarkZakelj/athena-cli
+# ===========================================================================
+
+# The _config block holds defaults shared by every table below.
+_config:
+  database: analytics            # Default Glue/Athena database. Tables without
+                                 # their own `database:` inherit this one.
+  catalog: AwsDataCatalog        # Data catalog. Defaults to AwsDataCatalog.
+  workgroup: primary             # Athena workgroup used to run DDL statements.
+  output_location: s3://my-athena-results/   # Where Athena writes query
+                                             # results. Optional if the
+                                             # workgroup already sets one.
+
+# ---------------------------------------------------------------------------
+# A table is any top-level key other than _config. The key is the table name.
+# ---------------------------------------------------------------------------
+events:
+  description: "Raw clickstream events"   # Free-text; becomes the table comment.
+  location: s3://my-data-lake/events/     # S3 prefix holding the data files.
+  format: parquet                         # parquet | orc | csv | json | avro
+
+  # columns: the table schema, as `name: athena_type`. Order is preserved.
+  columns:
+    event_id: string
+    user_id: bigint
+    amount: decimal(10, 2)                # Parameterized types are supported.
+    country: varchar(2)
+    is_test: boolean
+    created_at: timestamp
+    # Complex types nest arbitrarily: array<>, map<>, struct<>.
+    tags: array<string>
+    attributes: map<string, string>
+    device: struct<os:string, version:int>
+
+  # partitions: columns the data is partitioned by on S3. These are declared
+  # separately from `columns` and must NOT also appear there.
+  partitions:
+    dt: date
+    hour: int
+
+# A second table showing per-table overrides and SerDe properties.
+sessions_csv:
+  description: "Session export (CSV)"
+  database: reporting            # Overrides _config.database for THIS table only.
+  location: s3://my-data-lake/sessions/
+  format: csv
+  columns:
+    session_id: string
+    user_id: bigint
+    duration_seconds: int
+
+  # properties: extra SerDe / table properties passed straight through to the
+  # CREATE TABLE statement. Handy for things like skipping CSV headers.
+  properties:
+    skip.header.line.count: "1"
+    serialization.null.format: ""
+"""
+
+
+@app.command()
+def example() -> None:
+    """Print an annotated example table_definitions.yaml explaining each field."""
+    if console.is_terminal:
+        from rich.syntax import Syntax
+
+        console.print(Syntax(EXAMPLE_YAML, "yaml", background_color="default"))
+    else:
+        # Plain output so `athena-cli example > table_definitions.yaml` works.
+        typer.echo(EXAMPLE_YAML, nl=False)
+
+
 @app.command()
 def validate(
     schema_path: SchemaPathOption = None,
