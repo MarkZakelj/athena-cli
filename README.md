@@ -115,6 +115,19 @@ athena-cli push --force            # allow destructive changes (drop + recreate)
 
 Safe changes (adding columns, widening types like `int` → `bigint`) are applied automatically. Destructive changes (removing columns, changing types incompatibly, altering partitions) require `--force`, which drops and recreates the table after confirmation.
 
+### `recreate`
+
+Drops and recreates tables from the local schema, then runs `MSCK REPAIR TABLE` to rediscover partitions (`DROP` + `CREATE` + `MSCK REPAIR`).
+
+```bash
+athena-cli recreate                # all tables
+athena-cli recreate orders         # single table
+athena-cli recreate --dry-run      # print DDL without executing
+athena-cli recreate --yes          # skip confirmation
+```
+
+Use this instead of `push` when you don't have `ALTER TABLE` permission: rather than applying in-place `ALTER`s, each table is rebuilt from scratch, so the live column order matches the YAML exactly. The underlying S3 data is left untouched (tables are `EXTERNAL`), but all registered partitions are dropped — `MSCK REPAIR` only rediscovers Hive-style (`key=value`) partition paths.
+
 ### `pull`
 
 Pulls table definitions from Athena into your local YAML.

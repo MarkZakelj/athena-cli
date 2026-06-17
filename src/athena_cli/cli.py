@@ -374,6 +374,64 @@ def push(
 
 
 @app.command()
+def recreate(
+    schema_path: SchemaPathOption = None,
+    table_name: Annotated[
+        Optional[str],
+        typer.Argument(help="Table to recreate (all if omitted)", autocompletion=complete_table_name),
+    ] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Print DDL without executing")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation")] = False,
+) -> None:
+    """Drop and recreate tables, then rediscover partitions (DROP + CREATE + MSCK REPAIR).
+
+    Use this instead of `push` when you lack ALTER TABLE permission: each
+    table is dropped and recreated from the local schema (so column order
+    matches the YAML exactly), then partitions are rediscovered via
+    MSCK REPAIR. The underlying S3 data is untouched (EXTERNAL tables), but
+    all registered partitions are dropped — MSCK REPAIR only rediscovers
+    Hive-style (key=value) partition paths.
+    """
+    from athena_cli.athena_client import execute_ddl
+
+    _, schema = _load_schema(schema_path)
+    tables_to_recreate = [_get_table(schema, table_name)] if table_name else list(schema.tables.values())
+
+    for tbl in tables_to_recreate:
+        db = tbl.resolved_database(schema.config)
+        rprint(f"\n[bold]{db}.{tbl.name}[/bold]")
+
+        if tbl.location is None:
+            rprint("  [red]Error:[/red] 'location' is required to recreate a table")
+            continue
+
+        drop_ddl = generate_drop_table(tbl.name, db)
+        create_ddl = generate_create_table(tbl, db)
+        repair_ddl = generate_msck_repair(tbl.name, db) if tbl.partitions else None
+
+        actions = "DROP + CREATE" + (" + MSCK REPAIR" if repair_ddl else "")
+        rprint(f"  [yellow]{actions}[/yellow] {db}.{tbl.name}")
+
+        if dry_run:
+            rprint(f"\n[dim]{drop_ddl}[/dim]\n[dim]{create_ddl}[/dim]")
+            if repair_ddl:
+                rprint(f"[dim]{repair_ddl}[/dim]")
+            rprint("")
+            continue
+
+        if not yes and not typer.confirm(f"  Drop and recreate {db}.{tbl.name}?", default=False):
+            continue
+
+        execute_ddl(drop_ddl, schema.config)
+        execute_ddl(create_ddl, schema.config)
+        rprint("  [green]✓ Recreated[/green]")
+
+        if repair_ddl:
+            execute_ddl(repair_ddl, schema.config)
+            rprint("  [green]✓ Partitions repaired[/green]")
+
+
+@app.command()
 def pull(
     schema_path: SchemaPathOption = None,
     table_name: Annotated[
