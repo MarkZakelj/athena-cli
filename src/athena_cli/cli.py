@@ -255,7 +255,7 @@ def status(
     ] = None,
 ) -> None:
     """Compare local schema against live Athena tables."""
-    from athena_cli.athena_client import get_glue_table
+    from athena_cli.athena_client import TableNotFoundError, get_glue_table
     from athena_cli.diff import diff_table, print_diff
 
     path, schema = _load_schema(schema_path)
@@ -266,8 +266,11 @@ def status(
         rprint(f"\n[bold]{db}.{tbl.name}[/bold]")
         try:
             remote = get_glue_table(db, tbl.name, schema.config.catalog)
+        except TableNotFoundError:
+            rprint("  [yellow]Not found in Athena[/yellow]")
+            continue
         except Exception as e:
-            rprint(f"  [yellow]Not found in Athena:[/yellow] {e}")
+            rprint(f"  [red]Error querying Glue:[/red] {e}")
             continue
         diffs = diff_table(tbl, remote)
         if not diffs:
@@ -287,7 +290,7 @@ def push(
     force: Annotated[bool, typer.Option("--force", help="Allow destructive changes (drop + recreate)")] = False,
 ) -> None:
     """Push local schema to Athena (CREATE or ALTER tables)."""
-    from athena_cli.athena_client import execute_ddl, get_glue_table
+    from athena_cli.athena_client import TableNotFoundError, execute_ddl, get_glue_table
     from athena_cli.diff import diff_table
 
     path, schema = _load_schema(schema_path)
@@ -297,18 +300,20 @@ def push(
         db = tbl.resolved_database(schema.config)
         rprint(f"\n[bold]{db}.{tbl.name}[/bold]")
 
-        if tbl.location is None:
-            rprint("  [red]Error:[/red] 'location' is required for push on new tables")
-            continue
-
         # Check if table exists
         try:
             remote = get_glue_table(db, tbl.name, schema.config.catalog)
-        except Exception:
+        except TableNotFoundError:
             remote = None
+        except Exception as e:
+            rprint(f"  [red]Error:[/red] could not query Glue for {db}.{tbl.name}: {e}")
+            continue
 
         if remote is None:
             # CREATE
+            if tbl.location is None:
+                rprint("  [red]Error:[/red] 'location' is required for push on new tables")
+                continue
             ddl = generate_create_table(tbl, db)
             rprint(f"  [green]CREATE TABLE[/green] {db}.{tbl.name}")
             if dry_run:

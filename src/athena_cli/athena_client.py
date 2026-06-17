@@ -12,6 +12,10 @@ from athena_cli.types import SERDE_TO_FORMAT, normalize_type
 _session: boto3.Session | None = None
 
 
+class TableNotFoundError(Exception):
+    """Raised when a Glue table (or its database) does not exist."""
+
+
 def init_session(profile: str | None = None) -> None:
     """Initialize the boto3 session with an optional AWS profile."""
     global _session
@@ -38,7 +42,10 @@ def get_glue_table(database: str, table_name: str, catalog: str = "AwsDataCatalo
     Returns a dict with keys: columns, partitions, location, format, description, properties.
     """
     client = _glue_client()
-    response = client.get_table(DatabaseName=database, Name=table_name)
+    try:
+        response = client.get_table(DatabaseName=database, Name=table_name)
+    except client.exceptions.EntityNotFoundException as e:
+        raise TableNotFoundError(f"{database}.{table_name}") from e
     table = response["Table"]
     sd = table.get("StorageDescriptor", {})
 
