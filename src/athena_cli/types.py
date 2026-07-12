@@ -30,7 +30,7 @@ _CHAR_RE = re.compile(r"^char\(\d+\)$")
 
 # Complex type patterns — recursive
 _ARRAY_RE = re.compile(r"^array<(.+)>$")
-_MAP_RE = re.compile(r"^map<(.+),\s*(.+)>$")
+_MAP_RE = re.compile(r"^map<(.+)>$")
 _STRUCT_RE = re.compile(r"^struct<(.+)>$")
 
 
@@ -54,7 +54,10 @@ def validate_athena_type(type_str: str) -> bool:
 
     m = _MAP_RE.match(type_str)
     if m:
-        return validate_athena_type(m.group(1)) and validate_athena_type(m.group(2))
+        parts = _split_top_level(m.group(1), ",")
+        if len(parts) != 2:
+            return False
+        return validate_athena_type(parts[0].strip()) and validate_athena_type(parts[1].strip())
 
     m = _STRUCT_RE.match(type_str)
     if m:

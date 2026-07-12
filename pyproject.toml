@@ -1,6 +1,6 @@
 [project]
 name = "athena-cli"
-version = "0.1.4"
+version = "0.1.5"
 description = "Manage AWS Athena table schemas declaratively via table_definitions.yaml"
 readme = "README.md"
 authors = [
@@ -24,3 +24,8 @@ athena-cli = "athena_cli.cli:app_entry"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
